@@ -1,0 +1,5 @@
+{
+  "name": "SoraWeb - Cloudflare Worker",
+  "description": "A serverless web interface for Sora Video Generation API deployed on Cloudflare Workers.",
+  "requestFramePermissions": []
+}
