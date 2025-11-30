@@ -200,7 +200,7 @@ const HTML_CONTENT = `
             <span class="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-zinc-400">SoraWeb</span>
         </div>
         <div class="flex items-center gap-4">
-            <a href="https://github.com/openai/sora" target="_blank" class="text-zinc-500 hover:text-white transition-colors">
+            <a href="https://github.com/genz27/SoraWorker" target="_blank" class="text-zinc-500 hover:text-white transition-colors">
                 <i data-lucide="github" class="w-5 h-5"></i>
             </a>
         </div>
