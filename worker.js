@@ -19,6 +19,11 @@ export default {
       return await handleGenerateRequest(request, env);
     }
 
+    // 1.1 代理视频地址
+    if (request.method === 'GET' && url.pathname === '/api/proxy') {
+      return await handleProxyRequest(request);
+    }
+
     // 2. 处理前端页面请求
     return new Response(HTML_CONTENT, {
       headers: {
@@ -105,7 +110,7 @@ async function handleGenerateRequest(request, env) {
           content: finalContent
         }
       ],
-      stream: false 
+      stream: true
     };
 
     const apiResponse = await fetch(apiUrl, {
@@ -127,28 +132,76 @@ async function handleGenerateRequest(request, env) {
       throw new Error(errMsg);
     }
 
-    const data = await apiResponse.json();
-    
-    // 解析响应
-    let resultUrl = '';
-    const messageContent = data.choices?.[0]?.message?.content;
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
 
-    if (messageContent) {
-        // 尝试提取 URL
-        const urlMatch = messageContent.match(/https?:\/\/[^\s)]+/);
-        if (urlMatch) {
-            resultUrl = urlMatch[0];
-        } else {
-            resultUrl = messageContent; 
-        }
-    } else {
-        throw new Error('API 返回成功但未包含有效内容');
-    }
+    const stream = new ReadableStream({
+      start(controller) {
+        (async () => {
+          try {
+            const reader = apiResponse.body.getReader();
+            let buffer = '';
 
-    return new Response(JSON.stringify({ 
-        url: resultUrl
-    }), {
-      headers: { 'Content-Type': 'application/json' }
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+
+              buffer += decoder.decode(value, { stream: true });
+
+              const lines = buffer.split('\n');
+              buffer = lines.pop();
+
+              for (const raw of lines) {
+                const line = raw.trim();
+                if (!line.startsWith('data:')) continue;
+
+                const payloadStr = line.slice(5).trim();
+                if (payloadStr === '[DONE]') {
+                  controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+                  controller.close();
+                  return;
+                }
+
+                let parsed;
+                try {
+                  parsed = JSON.parse(payloadStr);
+                } catch (e) {
+                  continue;
+                }
+
+                const delta = parsed.choices?.[0]?.delta || {};
+
+                if (delta.reasoning_content) {
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'progress', message: delta.reasoning_content.trim() })}\n\n`));
+                }
+
+                if (delta.content) {
+                  const videoUrl = extractVideoUrl(delta.content);
+                  const proxied = videoUrl ? `/api/proxy?url=${encodeURIComponent(videoUrl)}` : delta.content;
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'result', url: proxied })}\n\n`));
+                }
+              }
+            }
+
+            if (buffer) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'progress', message: buffer.trim() })}\n\n`));
+            }
+
+            controller.close();
+          } catch (err) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'error', message: err.message || 'Stream error' })}\n\n`));
+            controller.close();
+          }
+        })();
+      }
+    });
+
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
+      }
     });
 
   } catch (error) {
@@ -157,6 +210,35 @@ async function handleGenerateRequest(request, env) {
       headers: { 'Content-Type': 'application/json' }
     });
   }
+}
+
+/**
+ * 代理真实视频 URL，隐藏源站地址
+ */
+async function handleProxyRequest(request) {
+  const url = new URL(request.url);
+  const target = url.searchParams.get('url');
+
+  if (!target) {
+    return new Response('Missing url parameter', { status: 400 });
+  }
+
+  try {
+    const upstream = await fetch(target);
+    const headers = new Headers(upstream.headers);
+    headers.set('Access-Control-Allow-Origin', '*');
+    return new Response(upstream.body, { status: upstream.status, headers });
+  } catch (e) {
+    return new Response('Proxy fetch failed', { status: 502 });
+  }
+}
+
+function extractVideoUrl(content) {
+  const videoTagMatch = content.match(/<video[^>]*src=['"]([^'" ]+)['"]/i);
+  if (videoTagMatch) return videoTagMatch[1];
+
+  const urlMatch = content.match(/https?:\/\/[^\s'"`]+/);
+  return urlMatch ? urlMatch[0] : null;
 }
 
 /**
@@ -265,6 +347,11 @@ const HTML_CONTENT = `
                     <p class="text-xs" id="err-text"></p>
                 </div>
 
+                <div id="progress-box" class="hidden p-3 bg-indigo-500/10 border border-indigo-500/20 rounded-xl flex items-start gap-2 text-indigo-200">
+                    <i data-lucide="loader" class="w-4 h-4 mt-0.5 flex-shrink-0 animate-spin"></i>
+                    <p class="text-xs leading-relaxed" id="progress-text"></p>
+                </div>
+
                 <button onclick="app.generate()" id="btn-generate" class="w-full py-4 bg-white text-black rounded-xl font-bold uppercase tracking-wider hover:bg-indigo-50 hover:scale-[1.02] transition-all flex items-center justify-center gap-2 shadow-[0_0_20px_-5px_rgba(255,255,255,0.3)]">
                     <i data-lucide="wand-2" class="w-4 h-4"></i> 生成内容
                 </button>
@@ -331,7 +418,8 @@ const HTML_CONTENT = `
             duration: '10s',
             files: [],
             loading: false,
-            currentItem: null
+            currentItem: null,
+            progress: null
         };
 
         // IndexedDB
@@ -480,6 +568,16 @@ const HTML_CONTENT = `
                 } else {
                     box.classList.add('hidden');
                 }
+            },
+            progress: () => {
+                const box = el('progress-box');
+                if(state.progress) {
+                    box.classList.remove('hidden');
+                    el('progress-text').textContent = state.progress;
+                } else {
+                    box.classList.add('hidden');
+                    el('progress-text').textContent = '';
+                }
             }
         };
 
@@ -487,6 +585,7 @@ const HTML_CONTENT = `
         const actions = {
             init: () => {
                 render.controls();
+                render.progress();
                 render.gallery();
                 lucide.createIcons();
             },
@@ -530,6 +629,8 @@ const HTML_CONTENT = `
                 state.loading = true;
                 render.loading();
                 render.error(null);
+                state.progress = '开始生成，等待进度...';
+                render.progress();
 
                 // Construct Model ID
                 let modelId = 'sora-image';
@@ -552,7 +653,7 @@ const HTML_CONTENT = `
 
                     const res = await fetch('/api/generate', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'x-access-code': code },
+                        headers: { 'Content-Type': 'application/json', 'x-access-code': code, 'Accept': 'text/event-stream' },
                         body: JSON.stringify(payload)
                     });
 
@@ -562,12 +663,60 @@ const HTML_CONTENT = `
                         throw new Error("授权失败，请重新输入密码");
                     }
 
-                    const data = await res.json();
-                    if(!res.ok) throw new Error(data.error || '请求失败');
+                    if(!res.ok) {
+                        const errorText = await res.text();
+                        let errMsg = errorText;
+                        try {
+                            const errJson = JSON.parse(errorText);
+                            errMsg = errJson.error || errorText;
+                        } catch {}
+                        throw new Error(errMsg || '请求失败');
+                    }
+
+                    if(!res.body) {
+                        throw new Error('未获取到响应数据');
+                    }
+
+                    const reader = res.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
+                    let resultUrl = null;
+
+                    while(true) {
+                        const { value, done } = await reader.read();
+                        if(done) break;
+
+                        buffer += decoder.decode(value, { stream: true });
+                        const parts = buffer.split('\n\n');
+                        buffer = parts.pop();
+
+                        for(const part of parts) {
+                            const line = part.trim();
+                            if(!line.startsWith('data:')) continue;
+                            const payloadStr = line.replace(/^data:\s*/, '');
+                            if(payloadStr === '[DONE]') continue;
+
+                            let evt;
+                            try {
+                                evt = JSON.parse(payloadStr);
+                            } catch (e) { continue; }
+
+                            if(evt.type === 'progress') {
+                                state.progress = evt.message;
+                                render.progress();
+                            } else if(evt.type === 'result') {
+                                resultUrl = evt.url;
+                            } else if(evt.type === 'error') {
+                                throw new Error(evt.message || '请求失败');
+                            }
+                        }
+                    }
+
+                    if(!resultUrl) throw new Error('未获取到生成结果');
 
                     await db.add({
                         id: crypto.randomUUID(),
-                        url: data.url,
+                        url: resultUrl,
                         prompt: prompt,
                         model: modelId,
                         type: state.mode,
@@ -581,6 +730,8 @@ const HTML_CONTENT = `
                 } catch (e) {
                     render.error(e.message);
                 } finally {
+                    state.progress = null;
+                    render.progress();
                     state.loading = false;
                     render.loading();
                 }
