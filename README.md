@@ -1,20 +1,11 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
-
-# Run and deploy your AI Studio app
-
-This contains everything you need to run your app locally.
-
-View your app in AI Studio: https://ai.studio/apps/drive/1ZDzkDDEf4zvkwaY7LKv8T19Vap_z2Giq
-
-## Run Locally
-
-**Prerequisites:**  Node.js
-
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+/**
+ * SoraWeb - Cloudflare Worker Version (Pure JS)
+ * 
+ * 部署说明:
+ * 1. 在 Cloudflare Workers 创建一个新 Worker。
+ * 2. 将此代码粘贴到 worker.js。
+ * 3. 在 Settings -> Variables and Secrets 中添加变量:
+ *    - SORA_API_KEY: (必填) 您的 API Key
+ *    - ACCESS_CODE: (可选) 设置访问密码
+ *    - SORA_BASE_URL: (可选) API Base URL (默认 http://localhost:8000)
+ */
