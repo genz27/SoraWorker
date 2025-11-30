@@ -289,12 +289,14 @@ const HTML_CONTENT = `
                 const items = await db.getAll(); const c = el('gallery-container'); c.innerHTML = '';
                 items.length===0 ? el('empty-state').classList.remove('hidden') : el('empty-state').classList.add('hidden');
                 items.forEach(i => {
-                    const isV = i.url.match(/\.(mp4|webm)/) || i.model.includes('video');
+                    const model = i.model || 'unknown';
+                    const url = i.url || '';
+                    const isV = (url && url.match(/\.(mp4|webm)/)) || model.includes('video');
                     const card = document.createElement('div');
                     card.className = 'group relative bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden cursor-pointer hover:border-zinc-600 transition-all';
                     card.onclick = () => app.openLightbox(i);
-                    const media = isV ? \`<video src="\${i.url}" class="w-full h-full object-cover" muted onmouseover="this.play()" onmouseout="this.pause()"></video><div class="absolute inset-0 flex items-center justify-center bg-black/20 group-hover:opacity-0"><i data-lucide="play" class="w-8 h-8 text-white fill-white"></i></div>\` : \`<img src="\${i.url}" class="w-full h-full object-cover">\`;
-                    card.innerHTML = \`<div class="aspect-video w-full bg-zinc-950 relative">\${media}<div class="absolute bottom-2 right-2 px-1.5 py-0.5 bg-black/60 backdrop-blur rounded text-[10px] text-zinc-300 font-mono">\${i.model}</div></div><div class="p-4"><p class="text-xs text-zinc-300 line-clamp-2">\${i.prompt||'No prompt'}</p><div class="mt-3 text-[10px] text-zinc-500">\${new Date(i.timestamp).toLocaleTimeString()}</div></div>\`;
+                    const media = isV ? \`<video src="\${url}" class="w-full h-full object-cover" muted onmouseover="this.play()" onmouseout="this.pause()"></video><div class="absolute inset-0 flex items-center justify-center bg-black/20 group-hover:opacity-0"><i data-lucide="play" class="w-8 h-8 text-white fill-white"></i></div>\` : \`<img src="\${url}" class="w-full h-full object-cover">\`;
+                    card.innerHTML = \`<div class="aspect-video w-full bg-zinc-950 relative">\${media}<div class="absolute bottom-2 right-2 px-1.5 py-0.5 bg-black/60 backdrop-blur rounded text-[10px] text-zinc-300 font-mono">\${model}</div></div><div class="p-4"><p class="text-xs text-zinc-300 line-clamp-2">\${i.prompt||'No prompt'}</p><div class="mt-3 text-[10px] text-zinc-500">\${new Date(i.timestamp).toLocaleTimeString()}</div></div>\`;
                     c.appendChild(card);
                 });
                 lucide.createIcons();
@@ -354,43 +356,53 @@ const HTML_CONTENT = `
                     const reader = res.body.getReader();
                     const decoder = new TextDecoder();
                     let finalUrl = '';
-                    
+                    let buffer = '';
+
+                    const processLine = (line) => {
+                        const trimmed = line.trim();
+                        if (!trimmed.startsWith('data:')) return;
+
+                        const jsonStr = trimmed.slice(5).trim();
+                        if (jsonStr === '[DONE]') return;
+
+                        try {
+                            const data = JSON.parse(jsonStr);
+                            const delta = data.choices?.[0]?.delta || {};
+
+                            // 1. 处理进度（兼容新格式，如 "**Video Generation Progress**: 9% (running)")
+                            if (delta.reasoning_content) {
+                                const progMatch = delta.reasoning_content.match(/(\d+)%/);
+                                if (progMatch) {
+                                    render.loading(progMatch[1]);
+                                }
+                            }
+
+                            // 2. 处理最终内容 (提取 URL)
+                            if (delta.content) {
+                                const urlMatch = delta.content.match(/src=['"]([^'"\\]+)['"]/);
+                                if (urlMatch) {
+                                    finalUrl = urlMatch[1];
+                                } else if (delta.content.startsWith('http')) {
+                                    finalUrl = delta.content;
+                                }
+                            }
+                        } catch (e) { console.error('Parse error', e); }
+                    };
+
                     while (true) {
                         const { done, value } = await reader.read();
-                        if (done) break;
-                        
-                        const chunk = decoder.decode(value);
-                        const lines = chunk.split('\\n');
-                        
+                        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+
+                        const lines = buffer.split('\\n');
+                        buffer = lines.pop() || '';
+
                         for (const line of lines) {
-                            if (line.startsWith('data: ')) {
-                                const jsonStr = line.slice(6);
-                                if (jsonStr === '[DONE]') break;
-                                try {
-                                    const data = JSON.parse(jsonStr);
-                                    const delta = data.choices[0].delta;
+                            processLine(line);
+                        }
 
-                                    // 1. 处理进度
-                                    if (delta.reasoning_content) {
-                                        // 匹配 "Progress: 9%"
-                                        const progMatch = delta.reasoning_content.match(/Progress\**:\s*(\d+)%/);
-                                        if (progMatch) {
-                                            render.loading(progMatch[1]);
-                                        }
-                                    }
-
-                                    // 2. 处理最终内容 (提取 URL)
-                                    if (delta.content) {
-                                        // 匹配 src='...' 或 src="..."
-                                        const urlMatch = delta.content.match(/src=['"]([^'"]+)['"]/);
-                                        if (urlMatch) {
-                                            finalUrl = urlMatch[1];
-                                        } else if (delta.content.startsWith('http')) {
-                                            finalUrl = delta.content;
-                                        }
-                                    }
-                                } catch (e) { console.error('Parse error', e); }
-                            }
+                        if (done) {
+                            if (buffer) processLine(buffer);
+                            break;
                         }
                     }
 
@@ -413,15 +425,17 @@ const HTML_CONTENT = `
                 }
             },
             
-            openLightbox: i => { 
-                state.currentItem = i; 
+            openLightbox: i => {
+                state.currentItem = i;
                 const box = el('lightbox-media');
-                const isV = i.url.match(/proxy/) || i.model.includes('video'); // Proxy implies video/large file typically
-                box.innerHTML = isV 
-                    ? \`<video src="\${i.url}" controls autoplay loop class="max-h-[80vh] w-auto rounded-lg shadow-2xl"></video>\` 
-                    : \`<img src="\${i.url}" class="max-h-[80vh] object-contain rounded-lg shadow-2xl">\`;
-                el('lightbox-text').textContent = i.prompt;
-                el('lightbox').classList.remove('hidden'); 
+                const url = i.url || '';
+                const model = i.model || '';
+                const isV = (url && url.match(/proxy/)) || model.includes('video'); // Proxy implies video/large file typically
+                box.innerHTML = isV
+                    ? \`<video src="\${url}" controls autoplay loop class="max-h-[80vh] w-auto rounded-lg shadow-2xl"></video>\`
+                    : \`<img src="\${url}" class="max-h-[80vh] object-contain rounded-lg shadow-2xl">\`;
+                el('lightbox-text').textContent = i.prompt || '';
+                el('lightbox').classList.remove('hidden');
             },
             closeLightbox: () => { el('lightbox').classList.add('hidden'); el('lightbox-media').innerHTML=''; state.currentItem=null; },
             downloadCurrent: () => {
