@@ -354,43 +354,53 @@ const HTML_CONTENT = `
                     const reader = res.body.getReader();
                     const decoder = new TextDecoder();
                     let finalUrl = '';
-                    
+                    let buffer = '';
+
+                    const processLine = (line) => {
+                        const trimmed = line.trim();
+                        if (!trimmed.startsWith('data:')) return;
+
+                        const jsonStr = trimmed.slice(5).trim();
+                        if (jsonStr === '[DONE]') return;
+
+                        try {
+                            const data = JSON.parse(jsonStr);
+                            const delta = data.choices?.[0]?.delta || {};
+
+                            // 1. 处理进度（兼容新格式，如 "**Video Generation Progress**: 9% (running)")
+                            if (delta.reasoning_content) {
+                                const progMatch = delta.reasoning_content.match(/(\d+)%/);
+                                if (progMatch) {
+                                    render.loading(progMatch[1]);
+                                }
+                            }
+
+                            // 2. 处理最终内容 (提取 URL)
+                            if (delta.content) {
+                                const urlMatch = delta.content.match(/src=['"]([^'"\\]+)['"]/);
+                                if (urlMatch) {
+                                    finalUrl = urlMatch[1];
+                                } else if (delta.content.startsWith('http')) {
+                                    finalUrl = delta.content;
+                                }
+                            }
+                        } catch (e) { console.error('Parse error', e); }
+                    };
+
                     while (true) {
                         const { done, value } = await reader.read();
-                        if (done) break;
-                        
-                        const chunk = decoder.decode(value);
-                        const lines = chunk.split('\\n');
-                        
+                        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+
+                        const lines = buffer.split('\\n');
+                        buffer = lines.pop() || '';
+
                         for (const line of lines) {
-                            if (line.startsWith('data: ')) {
-                                const jsonStr = line.slice(6);
-                                if (jsonStr === '[DONE]') break;
-                                try {
-                                    const data = JSON.parse(jsonStr);
-                                    const delta = data.choices[0].delta;
+                            processLine(line);
+                        }
 
-                                    // 1. 处理进度
-                                    if (delta.reasoning_content) {
-                                        // 匹配 "Progress: 9%"
-                                        const progMatch = delta.reasoning_content.match(/Progress\**:\s*(\d+)%/);
-                                        if (progMatch) {
-                                            render.loading(progMatch[1]);
-                                        }
-                                    }
-
-                                    // 2. 处理最终内容 (提取 URL)
-                                    if (delta.content) {
-                                        // 匹配 src='...' 或 src="..."
-                                        const urlMatch = delta.content.match(/src=['"]([^'"]+)['"]/);
-                                        if (urlMatch) {
-                                            finalUrl = urlMatch[1];
-                                        } else if (delta.content.startsWith('http')) {
-                                            finalUrl = delta.content;
-                                        }
-                                    }
-                                } catch (e) { console.error('Parse error', e); }
-                            }
+                        if (done) {
+                            if (buffer) processLine(buffer);
+                            break;
                         }
                     }
 
